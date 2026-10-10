@@ -1,5 +1,4 @@
 # FreeRADIUS Docker image para freeRadius_LDAP.
-# Base migrada de src/daloradius.
 #
 # Build image:
 # 1. docker compose build radius
@@ -9,7 +8,7 @@
 
 FROM freeradius/freeradius-server:3.2.10
 LABEL maintainer="freeRadius_LDAP"
-LABEL Description="FreeRADIUS 3.2.10 para freeRadius_LDAP (base migrada de daloradius, sin UI)." \
+LABEL Description="FreeRADIUS 3.2.10 para freeRadius_LDAP." \
 	License="GPLv2" \
 	Usage="docker build -t freeradius-ldap:3.2.10-local -f Dockerfile && docker run -d -p 1812:1812/udp -p 1813:1813/udp freeradius-ldap:3.2.10-local" \
 	Version="1.0"

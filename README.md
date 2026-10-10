@@ -5,6 +5,7 @@ Despliegue base de FreeRADIUS 3.2.10 con MariaDB 11.8, derivado de
 Incluye un hook LDAP documentado (`configure_ldap()` en
 `init-freeradius-ldap.sh` + variables `LDAP_*` comentadas en el compose)
 que se ajusta despues del despliegue base.
+Algunos de los scripts utilizados se basan en los del proyecto daloRADIUS. (lirantal/daloradius) Licencia GPLv2.
 
 ## Servicios
 
@@ -16,8 +17,8 @@ que se ajusta despues del despliegue base.
 ## Despliegue
 
 ```powershell
-cd src/freeRadius_LDAP
-./scripts/init-env.ps1        # genera .env con MYSQL_PASSWORD y DEFAULT_CLIENT_SECRET
+cd src/freeRadius_LDAP  # raiz de este repositorio
+./scripts/init-env.ps1        # genera .env con MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD y DEFAULT_CLIENT_SECRET
 docker compose config         # valida el compose con el .env generado
 docker compose build radius   # radius es imagen local (build: Dockerfile), no viene de un registry
 docker compose pull
@@ -26,8 +27,8 @@ docker compose ps
 ```
 
 ```bash
-cd src/freeRadius_LDAP
-./scripts/init-env.sh         # genera .env con MYSQL_PASSWORD y DEFAULT_CLIENT_SECRET
+cd src/freeRadius_LDAP   # raiz de este repositorio
+./scripts/init-env.sh         # genera .env con MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD y DEFAULT_CLIENT_SECRET
 docker compose config         # valida el compose con el .env generado
 docker compose build radius   # radius es imagen local (build: Dockerfile), no viene de un registry
 docker compose pull
@@ -62,4 +63,4 @@ en `init-freeradius-ldap.sh` solo registra
 
 - Docker Hub tags: https://hub.docker.com/r/freeradius/freeradius-server/tags
 - GitHub freeradius-server: https://github.com/FreeRADIUS/freeradius-server
-- Base: `src/daloradius/docker-compose.yml` (proyecto lirantal/daloradius)
+- Atribucion de origen: el script `init-freeradius-ldap.sh` se basa en el script `init-freeradius.sh` del proyecto daloRADIUS (https://github.com/lirantal/daloradius), licencia GPLv2.

@@ -1,7 +1,6 @@
 #!/bin/bash
 # Executable process script for freeRadius_LDAP freeradius docker image.
-# Derivado de daloRADIUS: git@github.com:lirantal/daloradius.git
-# Base: src/daloradius/init-freeradius.sh + hook LDAP reservado.
+# FreeRADIUS init script para freeRadius_LDAP: FreeRADIUS puro + hook LDAP reservado.
 set -euo pipefail
 
 RADIUS_PATH=/etc/freeradius
@@ -238,12 +237,12 @@ function enable_group_nas_restrictions {
 		exit 1
 	}
 
-	# Enforce daloRADIUS group/profile NAS restrictions stored in radgroupcheck.
+	# Enforce group/profile NAS restrictions stored in radgroupcheck.
 	# FreeRADIUS uses radgroupcheck to decide whether group reply items apply; it
 	# does not automatically reject a user who already authenticated via radcheck.
 	# This policy rejects users when their SQL group has NAS-IP-Address == rows
 	# and the request NAS-IP-Address does not match any of those allowed values.
-	if grep -q "daloRADIUS group NAS restriction policy" "$RADIUS_PATH/sites-available/default"; then
+	if grep -q "group NAS restriction policy" "$RADIUS_PATH/sites-available/default"; then
 		rm -f "$freeradius_default_tmp"
 		return
 	fi
@@ -254,7 +253,7 @@ function enable_group_nas_restrictions {
 			print
 			if (!added && /^[[:space:]]*noresetcounter[[:space:]]*$/) {
 				print ""
-				print "\t\t# daloRADIUS group NAS restriction policy"
+				print "\t\t# group NAS restriction policy"
 				print "\t\t# Enforce radgroupcheck NAS-IP-Address == restrictions as an"
 				print "\t\t# authentication deny rule for users assigned to SQL groups."
 				print "\t\tif (&request:NAS-IP-Address) {"
@@ -270,23 +269,10 @@ function enable_group_nas_restrictions {
 		END { exit added ? 0 : 1 }
 	' "$RADIUS_PATH/sites-available/default" > "$freeradius_default_tmp"; then
 		rm -f "$freeradius_default_tmp"
-		echo "Failed to add daloRADIUS group NAS restriction policy to FreeRADIUS authorize section."
+		echo "Failed to add group NAS restriction policy to FreeRADIUS authorize section."
 		exit 1
 	fi
 	mv "$freeradius_default_tmp" "$RADIUS_PATH/sites-available/default"
-}
-
-function ensure_daloradius_schema {
-	mysql_radius <<'EOSQL'
-CREATE TABLE IF NOT EXISTS `radhuntgroup` (
-  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
-  `groupname` varchar(64) NOT NULL DEFAULT '',
-  `nasipaddress` varchar(15) NOT NULL DEFAULT '',
-  `nasportid` varchar(15) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `nasipaddress` (`nasipaddress`)
-);
-EOSQL
 }
 
 function ensure_docker_client {
@@ -308,7 +294,6 @@ EOSQL
 function init_database {
 	mysql_radius < "$RADIUS_PATH/mods-config/sql/main/mysql/schema.sql"
 	mysql_radius < "$RADIUS_PATH/mods-config/sql/ippool/mysql/schema.sql"
-	ensure_daloradius_schema
 	ensure_docker_client
 
 	echo "Database initialization for freeradius completed."
@@ -358,12 +343,10 @@ fi
 DB_LOCK=/data/.db_init_done
 if test -f "$DB_LOCK"; then
 	echo "Database lock file exists, skipping initial setup of mysql database."
-	ensure_daloradius_schema
 	ensure_docker_client
 else
 	if tables_exist "radcheck" "radacct" "nas"; then
 		echo "Existing FreeRADIUS database schema detected, skipping initial setup of mysql database."
-		ensure_daloradius_schema
 		ensure_docker_client
 	else
 		init_database
