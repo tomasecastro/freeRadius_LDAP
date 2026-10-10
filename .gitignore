@@ -1,0 +1,5 @@
+.env
+data/
+var/backup/
+logs/
+*.log

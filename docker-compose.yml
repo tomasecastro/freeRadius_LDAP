@@ -1,0 +1,71 @@
+services:
+
+  radius-mysql:
+    image: mariadb:11.8
+    container_name: radius-mysql
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      - MYSQL_DATABASE=radius
+      - MYSQL_USER=radius
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - "./data/mysql:/var/lib/mysql"
+      - "./var/backup:/docker-entrypoint-initdb.d:ro"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: ${MYSQL_HEALTH_START_PERIOD:-10m}
+
+  radius:
+    image: freeradius-ldap:3.2.10-local
+    container_name: radius
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    depends_on:
+      radius-mysql:
+        condition: service_healthy
+    ports:
+      - '1812:1812/udp'
+      - '1813:1813/udp'
+    environment:
+      - TZ=${TZ:-Europe/Vienna}
+      - MYSQL_HOST=radius-mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=radius
+      - MYSQL_USER=radius
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      - DEFAULT_CLIENT_SECRET=${DEFAULT_CLIENT_SECRET:?Set DEFAULT_CLIENT_SECRET in .env}
+      - FREERADIUS_SQL_TLS=${FREERADIUS_SQL_TLS:-disabled}
+      # LDAP hook reservado — se ajusta tras despliegue base.
+      # Descomentar y rellenar cuando se defina el directorio LDAP.
+      # - LDAP_HOST=${LDAP_HOST:-}
+      # - LDAP_PORT=${LDAP_PORT:-389}
+      # - LDAP_BASE_DN=${LDAP_BASE_DN:-}
+      # - LDAP_BIND_DN=${LDAP_BIND_DN:-}
+    volumes:
+      - ./data/freeradius:/data
+      - radius_logs:/var/log/freeradius
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'FreeRADIUS-Statistics-Type = 1' | radclient -q -r 1 -t 3 127.0.0.1:18121 status adminsecret >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Uncomment below to enable debug logging.
+    #command: -X
+
+volumes:
+  radius_logs:
