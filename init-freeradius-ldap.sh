@@ -4,6 +4,10 @@
 set -euo pipefail
 
 RADIUS_PATH=/etc/freeradius
+# Las plantillas de FreeRADIUS 3.2 se indentan con tabuladores reales; los
+# patrones sed/awk de este script dependen de ello, asi que se usa una variable
+# en lugar de escribir tabuladores literales.
+TAB=$'\t'
 MYSQL_HOST=${MYSQL_HOST:-localhost}
 MYSQL_PORT=${MYSQL_PORT:-3306}
 MYSQL_DATABASE=${MYSQL_DATABASE:-raddb}
@@ -12,6 +16,30 @@ MYSQL_PASSWORD=${MYSQL_PASSWORD:-radpass}
 MYSQL_WAIT_INTERVAL=${MYSQL_WAIT_INTERVAL:-5}
 DEFAULT_CLIENT_SECRET=${DEFAULT_CLIENT_SECRET:-testing123}
 FREERADIUS_SQL_TLS=${FREERADIUS_SQL_TLS:-disabled}
+
+# LDAP (directorio de identidad, por ejemplo un Outpost LDAP en el mismo host).
+# Si LDAP_HOST esta vacio el despliegue sigue en modo base (solo SQL) y estas
+# variables no se tocan. Si LDAP_HOST esta definido, BASE_DN/BIND_DN/BIND_PW son
+# obligatorias: el script falla rapido si falta alguna.
+LDAP_HOST=${LDAP_HOST:-}
+LDAP_PORT=${LDAP_PORT:-389}
+LDAP_BASE_DN=${LDAP_BASE_DN:-}
+LDAP_BIND_DN=${LDAP_BIND_DN:-}
+LDAP_BIND_PW=${LDAP_BIND_PW:-}
+# El valor por defecto va entrecomillado: sin las comillas el ")" del filtro
+# rompe la expansion de parametros y el script no llega ni a parsearse.
+LDAP_USER_FILTER=${LDAP_USER_FILTER:-"(cn=%{User-Name})"}
+# Grupos: base DN y filtro de busqueda configurables, NO horneados en el
+# script. La plantilla de FreeRADIUS 3.2 usa "ou=groups" implicito y
+# posixGroup, que el Outpost LDAP de este despliegue no sirve (publica los
+# grupos bajo ou=groups,<base DN> con objectClass "group"); con posixGroup la
+# resolucion de grupos queda inactiva y la VLAN cae siempre a DEFAULT_VLAN.
+# Se dejan vacias aqui y se completan en apply_ldap_group_defaults (solo con
+# LDAP activo, para no depender de LDAP_BASE_DN en modo base).
+LDAP_GROUP_BASE_DN=${LDAP_GROUP_BASE_DN:-}
+LDAP_GROUP_FILTER=${LDAP_GROUP_FILTER:-}
+# Sustitutos cuando LDAP no esta activo.
+DEFAULT_VLAN=${DEFAULT_VLAN:-20}
 
 MYSQL_DEFAULTS_FILE=""
 
@@ -96,12 +124,254 @@ function configure_sql_tls {
 	esac
 }
 
+# ---------------------------------------------------------------------------
+# LDAP (rlm_ldap)
+#
+# Escribe un valor en una clave de raddb/mods-available/ldap. Sigue el mismo
+# patron que sql_config_set(): escapa el valor y reescribe la linea completa.
+#
+# El estado "active"/"commented" indica si en la plantilla original de
+# FreeRADIUS 3.2 esa clave ya esta activa (una sola linea) o comentada. Hace
+# falta porque "server" aparece en tres lineas (una activa y dos comentadas de
+# ejemplo): sin distinguir, un solo sed activaria las tres y FreeRADIUS
+# rechazaria la configuracion por clave duplicada.
+# ---------------------------------------------------------------------------
+function ldap_config_set {
+	local key="$1"
+	local state="$2"
+	local value
+	local prefix
+
+	value=$(escape_sed_replacement "$3" | sed -e 's/"/\\"/g')
+	if [ "$state" = "active" ]; then
+		prefix="^${TAB}"
+	else
+		prefix="^#\\?${TAB}"
+	fi
+	sed -i "s|${prefix}${key}[[:space:]]*=.*|${TAB}${key} = \"${value}\"|" "$RADIUS_PATH/mods-available/ldap"
+}
+
+# La user {} de la plantilla tiene varias lineas "\t\tfilter = ..." (user, group
+# y client). Solo la de user va entre comillas dobles, asi que exigir la doble
+# comilla acota la sustitucion al bloque user y deja group/client intactos.
+function ldap_user_filter_set {
+	local value
+
+	value=$(escape_sed_replacement "$1" | sed -e 's/"/\\"/g')
+	sed -i "s|^${TAB}${TAB}filter[[:space:]]*=[[:space:]]*\".*|${TAB}${TAB}filter = \"${value}\"|" "$RADIUS_PATH/mods-available/ldap"
+}
+
+# Completa los valores por defecto de grupo cuando llegan vacios. Solo se
+# llama con LDAP activo (configure_ldap), nunca en modo base.
+#
+# No es un error: si las variables no vienen, el despliegue sigue arrancando
+# con "ou=groups,<LDAP_BASE_DN>" y "(objectClass=group)", que es el esquema que
+# sirve el Outpost LDAP de este despliegue. El aviso sale una sola vez porque
+# las variables quedan rellenas tras la primera llamada (configure_ldap se
+# ejecuta dos veces por arranque).
+function apply_ldap_group_defaults {
+	local defaulted=""
+
+	if [ -z "$LDAP_GROUP_BASE_DN" ]; then
+		LDAP_GROUP_BASE_DN="ou=groups,${LDAP_BASE_DN}"
+		defaulted="${defaulted} LDAP_GROUP_BASE_DN"
+	fi
+
+	if [ -z "$LDAP_GROUP_FILTER" ]; then
+		LDAP_GROUP_FILTER="(objectClass=group)"
+		defaulted="${defaulted} LDAP_GROUP_FILTER"
+	fi
+
+	if [ -n "$defaulted" ]; then
+		echo "LDAP group settings empty, using defaults for:${defaulted} (group_base_dn='${LDAP_GROUP_BASE_DN}' group_filter='${LDAP_GROUP_FILTER}')"
+	fi
+}
+
+# Habilita la resolucion de grupos. En FreeRADIUS 3.2 la clave que documenta
+# el nombre de grupo se llama name_attribute (antes groupname_attribute en v2.x).
+#
+# base_dn, filter, name_attribute y membership_attribute se reescriben SIEMPRE
+# dentro del bloque "group {}". Es obligatorio acotarlos con el rango de sed
+# "/group {/,/}": en la plantilla los bloques user {}, group {} y client {}
+# declaran "base_dn" con el mismo texto e indentacion, asi que un sed por clave
+# sin rango tocaria tambien user y client.
+function enable_ldap_group_membership {
+	local group_base_dn_sed
+	local group_filter_sed
+
+	group_base_dn_sed=$(escape_sed_replacement "$LDAP_GROUP_BASE_DN")
+	group_filter_sed=$(escape_sed_replacement "$LDAP_GROUP_FILTER")
+
+	sed -i "/^${TAB}group[[:space:]]*[{]/,/^${TAB}}/{
+		s|^#\\?${TAB}${TAB}base_dn[[:space:]]*=.*|${TAB}${TAB}base_dn = \"${group_base_dn_sed}\"|
+		s|^#\\?${TAB}${TAB}filter[[:space:]]*=.*|${TAB}${TAB}filter = \"${group_filter_sed}\"|
+		s|^#\\?${TAB}${TAB}name_attribute[[:space:]]*=.*|${TAB}${TAB}name_attribute = cn|
+		s|^#\\?${TAB}${TAB}membership_attribute[[:space:]]*=.*|${TAB}${TAB}membership_attribute = 'memberOf'|
+	}" "$RADIUS_PATH/mods-available/ldap"
+}
+
+# En sites-available/default, "authorize" lleva "-ldap" (el prefijo "-" lo
+# desactiva). Se quita el "-" y no se vuelve a insertar si ya esta activo.
+function enable_ldap_in_authorize {
+	local freeradius_default_tmp
+	freeradius_default_tmp=$(mktemp) || {
+		echo "Failed to create temporary file."
+		exit 1
+	}
+
+	if ! awk '
+		BEGIN { in_authorize = 0; found = 0 }
+		/^authorize[[:space:]]*[{]/ { in_authorize = 1 }
+		/^authenticate[[:space:]]*[{]/ { in_authorize = 0 }
+		in_authorize && !found && /^[[:space:]]*-?ldap[[:space:]]*$/ {
+			found = 1
+			sub(/-ldap[[:space:]]*$/, "ldap")
+		}
+		{ print }
+		END { exit found ? 0 : 1 }
+	' "$RADIUS_PATH/sites-available/default" > "$freeradius_default_tmp"; then
+		rm -f "$freeradius_default_tmp"
+		echo "Failed to enable the ldap module in the FreeRADIUS authorize section."
+		exit 1
+	fi
+	mv "$freeradius_default_tmp" "$RADIUS_PATH/sites-available/default"
+}
+
+# En "authenticate", el bloque "Auth-Type LDAP" viene comentado en la plantilla.
+# Se sustituye el bloque comentado completo por el activo (idempotente: si ya
+# esta activo se deja intacto).
+function enable_ldap_auth_type {
+	local freeradius_default_tmp
+	freeradius_default_tmp=$(mktemp) || {
+		echo "Failed to create temporary file."
+		exit 1
+	}
+
+	if ! awk '
+		BEGIN { in_auth = 0; skip = 0; found = 0 }
+		{
+			line = $0
+			if (skip) {
+				if (line ~ /^#[[:space:]]*ldap[[:space:]]*$/ || line ~ /^#[[:space:]]*}[[:space:]]*$/) next
+				skip = 0
+			}
+			if (line ~ /^authenticate[[:space:]]*[{]/) in_auth = 1
+			else if (line ~ /^post-auth[[:space:]]*[{]/) in_auth = 0
+			if (in_auth && line ~ /^#?[[:space:]]*Auth-Type LDAP[[:space:]]*[{]/) {
+				found = 1
+				if (line ~ /^#/) {
+					print "\tAuth-Type LDAP {"
+					print "\t\tldap"
+					print "\t}"
+					skip = 1
+					next
+				}
+			}
+			print
+		}
+		END { exit found ? 0 : 1 }
+	' "$RADIUS_PATH/sites-available/default" > "$freeradius_default_tmp"; then
+		rm -f "$freeradius_default_tmp"
+		echo "Failed to enable Auth-Type LDAP in the FreeRADIUS authenticate section."
+		exit 1
+	fi
+	mv "$freeradius_default_tmp" "$RADIUS_PATH/sites-available/default"
+}
+
+# ---------------------------------------------------------------------------
+# VLAN post-auth - asignacion dinamica desde el atributo del grupo LDAP.
+#
+# La identidad (usuarios y grupos, incluido el atributo FreeRADIUSVLAN) vive en
+# el directorio, pero los clientes RADIUS (NAS) viven en la tabla nas de SQL
+# (ver scripts/add-nas.sh). El post-auth se ejecuta solo cuando LDAP esta
+# activo. Patron de bloque idempotente "VLAN CONFIG" con sed i\, igual que el
+# bloque VLAN ya probado del init de origen.
+#
+# La busqueda del grupo del usuario cuelga de LDAP_GROUP_BASE_DN (no de un
+# "ou=groups" horneado): es la misma base que usa el bloque group {} de
+# rlm_ldap, para que resolucion de grupos y VLAN miren el mismo sitio.
+# ---------------------------------------------------------------------------
+function enable_vlan_post_auth_ldap {
+	local group_base_dn_sed
+	local default_vlan_sed
+
+	if grep -q "VLAN CONFIG" "$RADIUS_PATH/sites-available/default" 2>/dev/null; then
+		echo "VLAN post-auth already applied, skipping."
+		return
+	fi
+
+	group_base_dn_sed=$(escape_sed_replacement "$LDAP_GROUP_BASE_DN")
+	default_vlan_sed=$(escape_sed_replacement "$DEFAULT_VLAN")
+
+	sed -i "/^[[:space:]]*Post-Auth-Type REJECT/{
+	i\\
+	# VLAN CONFIG - Dynamic VLAN assignment from the LDAP group attribute\\
+	if (!reply:Tunnel-Private-Group-Id) {\\
+		update reply {\\
+			Tunnel-Private-Group-Id := \"%{ldap:ldap:///${group_base_dn_sed}?FreeRADIUSVLAN?sub?(member=%{control:Ldap-UserDn})}\"\\
+		}\\
+	}\\
+\\
+	if (!reply:Tunnel-Private-Group-Id) {\\
+		update reply {\\
+			Tunnel-Private-Group-Id := \"${default_vlan_sed}\"\\
+		}\\
+	}\\
+\\
+	update reply {\\
+		Tunnel-Type := VLAN\\
+		Tunnel-Medium-Type := IEEE-802\\
+	}\\
+	}
+}" "$RADIUS_PATH/sites-available/default"
+
+	echo "VLAN post-auth enabled."
+}
+
 function configure_ldap {
-	# TODO-estructural: hook LDAP reservado para ajuste posterior al despliegue base.
-	# Aqui se mapearan LDAP_HOST / LDAP_PORT / LDAP_BASE_DN / LDAP_BIND_DN
-	# al modulo rlm_ldap cuando se defina el directorio. De momento no toca
-	# ninguna configuracion: solo deja constancia en el log.
-	echo "LDAP hook reservado, se ajusta tras despliegue base"
+	local missing
+	local value
+
+	if [ -z "$LDAP_HOST" ]; then
+		echo "LDAP disabled (LDAP_HOST empty), base mode"
+		return 0
+	fi
+
+	# Fail-fast: con LDAP_HOST definido, un directorio sin credenciales o sin
+	# base_dn arrancaria mal (bind anonimo / busqueda en la raiz equivocada).
+	for missing in LDAP_BASE_DN LDAP_BIND_DN LDAP_BIND_PW; do
+		case "$missing" in
+			LDAP_BASE_DN) value="$LDAP_BASE_DN" ;;
+			LDAP_BIND_DN) value="$LDAP_BIND_DN" ;;
+			LDAP_BIND_PW) value="$LDAP_BIND_PW" ;;
+		esac
+		if [ -z "$value" ]; then
+			echo "LDAP_HOST is set but $missing is empty. Set $missing or unset LDAP_HOST." >&2
+			exit 1
+		fi
+	done
+
+	if [ ! -f "$RADIUS_PATH/mods-available/ldap" ]; then
+		echo "raddb/mods-available/ldap not found: the rlm_ldap module (freeradius-ldap) is missing from the image." >&2
+		exit 1
+	fi
+
+	apply_ldap_group_defaults
+
+	ldap_config_set server active "$LDAP_HOST"
+	ldap_config_set port commented "$LDAP_PORT"
+	ldap_config_set identity commented "$LDAP_BIND_DN"
+	ldap_config_set password commented "$LDAP_BIND_PW"
+	ldap_config_set base_dn active "$LDAP_BASE_DN"
+	ldap_user_filter_set "$LDAP_USER_FILTER"
+	enable_ldap_group_membership
+
+	ln -sf "$RADIUS_PATH/mods-available/ldap" "$RADIUS_PATH/mods-enabled/ldap"
+	enable_ldap_in_authorize
+	enable_ldap_auth_type
+	enable_vlan_post_auth_ldap
+
+	echo "LDAP configured against $LDAP_HOST:$LDAP_PORT (base_dn=$LDAP_BASE_DN, group_base_dn=$LDAP_GROUP_BASE_DN, group_filter=$LDAP_GROUP_FILTER)."
 }
 
 function prepare_freeradius_logs {
@@ -338,6 +608,14 @@ fi
 if test -L "$RADIUS_PATH/mods-enabled/sql"; then
 	enable_sql_session_tracking
 	enable_group_nas_restrictions
+fi
+
+# Re-apply the LDAP wiring on every start so that changing the LDAP_* variables
+# and running "docker compose up -d" is enough (no image rebuild needed). When
+# LDAP_HOST is empty nothing is touched and the server stays in base SQL mode.
+# Every step inside configure_ldap is idempotent.
+if [ -n "$LDAP_HOST" ] && test -f "$RADIUS_PATH/mods-available/ldap"; then
+	configure_ldap
 fi
 
 DB_LOCK=/data/.db_init_done

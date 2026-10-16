@@ -24,6 +24,7 @@ RUN apt-get update \
 		tzdata \
 		net-tools \
 		mariadb-client \
+		freeradius-ldap \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Create directories

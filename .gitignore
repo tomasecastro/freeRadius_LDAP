@@ -3,3 +3,7 @@ data/
 var/backup/
 logs/
 *.log
+
+# [002-CONSTITUTION] copia runtime de constitution (no versionar)
+.specify/constitution.md
+

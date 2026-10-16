@@ -1,0 +1,95 @@
+# Blueprint: grupos y usuarios para FreeRADIUS con VLAN dinamica
+#
+# QUE HACE
+#   Crea dos grupos y dos usuarios de prueba. El atributo FreeRADIUSVLAN de
+#   cada grupo es lo que FreeRADIUS lee del LDAP para devolver el atributo
+#   Tunnel-Private-Group-Id en la respuesta Access-Accept hacia el AP.
+#
+#   - wifi-prueba-alta  tiene FreeRADIUSVLAN=30  -> sus usuarios reciben VLAN 30
+#   - wifi-prueba-baja  NO tiene atributo        -> sus usuarios reciben
+#                                                    DEFAULT_VLAN (comportamiento
+#                                                    de reserva que hay que validar)
+#
+# COMO APLICAR (desde el directorio del despliegue de authentik)
+#
+#   docker cp blueprints/grupos-free-radius.yaml \
+#       authenlik-server-1:/blueprints/custom/
+#   docker compose restart server worker
+#   docker compose logs worker | grep -i blueprint
+#
+# COMO REVERTIR
+#
+#   docker exec authenlik-server-1 rm /blueprints/custom/grupos-free-radius.yaml
+#   docker compose restart server worker
+#
+#   Ojo: al borrar el archivo y reiniciar, authentik NO elimina lo ya creado.
+#   Los grupos y usuarios permanecen; hay que borrarlos desde el panel o la API.
+#
+# NOTA SOBRE LAS CONTRASENAS
+#   Los usuarios de prueba se crean sin contrasena. Para poder probarlos con
+#   radtest hay que asignarles una desde el panel:
+#   Directorio -> Usuarios -> (usuario) -> Detalles -> boton de contrasena.
+
+version: 1
+
+metadata:
+  name: free-radius-grupos
+
+entries:
+  # ---------------------------------------------------------------------
+  # Grupo con VLAN asignada.
+  # ---------------------------------------------------------------------
+  - model: authentik_core.group
+    id: grupo-vlan-alta
+    state: present
+    identifiers:
+      name: wifi-prueba-alta
+    attrs:
+      name: wifi-prueba-alta
+      is_superuser: false
+      attributes:
+        # Atributo custom que FreeRADIUS busca en el LDAP. Si un usuario
+        # pertenece a este grupo, su Access-Accept lleva Tunnel-Private-Group-Id: 30
+        FreeRADIUSVLAN: "30"
+
+  # ---------------------------------------------------------------------
+  # Grupo sin VLAN asignada, para validar el comportamiento de reserva.
+  # ---------------------------------------------------------------------
+  - model: authentik_core.group
+    id: grupo-sin-vlan
+    state: present
+    identifiers:
+      name: wifi-prueba-baja
+    attrs:
+      name: wifi-prueba-baja
+      is_superuser: false
+
+  # ---------------------------------------------------------------------
+  # Usuario de prueba en el grupo con VLAN.
+  # ---------------------------------------------------------------------
+  - model: authentik_core.user
+    id: usuario-alta
+    state: present
+    identifiers:
+      username: prueba.alta
+    attrs:
+      username: prueba.alta
+      name: Usuario de Prueba Alta
+      is_active: true
+      groups:
+        - !KeyOf grupo-vlan-alta
+
+  # ---------------------------------------------------------------------
+  # Usuario de prueba en el grupo sin VLAN.
+  # ---------------------------------------------------------------------
+  - model: authentik_core.user
+    id: usuario-baja
+    state: present
+    identifiers:
+      username: prueba.baja
+    attrs:
+      username: prueba.baja
+      name: Usuario de Prueba Baja
+      is_active: true
+      groups:
+        - !KeyOf grupo-sin-vlan

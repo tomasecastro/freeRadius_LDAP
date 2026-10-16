@@ -49,12 +49,20 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
       - DEFAULT_CLIENT_SECRET=${DEFAULT_CLIENT_SECRET:?Set DEFAULT_CLIENT_SECRET in .env}
       - FREERADIUS_SQL_TLS=${FREERADIUS_SQL_TLS:-disabled}
-      # LDAP hook reservado — se ajusta tras despliegue base.
-      # Descomentar y rellenar cuando se defina el directorio LDAP.
-      # - LDAP_HOST=${LDAP_HOST:-}
-      # - LDAP_PORT=${LDAP_PORT:-389}
-      # - LDAP_BASE_DN=${LDAP_BASE_DN:-}
-      # - LDAP_BIND_DN=${LDAP_BIND_DN:-}
+      # Directorio de identidad (Outpost LDAP). LDAP_HOST vacio = modo base (solo SQL).
+      - LDAP_HOST=${LDAP_HOST:-}
+      - LDAP_PORT=${LDAP_PORT:-389}
+      - LDAP_BASE_DN=${LDAP_BASE_DN:-}
+      - LDAP_BIND_DN=${LDAP_BIND_DN:-}
+      - LDAP_BIND_PW=${LDAP_BIND_PW:-}
+      - LDAP_USER_FILTER=${LDAP_USER_FILTER:-(cn=%{User-Name})}
+      # Grupos del directorio. Vacio = default del init (ou=groups,<LDAP_BASE_DN>
+      # y (objectClass=group)); ajustalos si tu directorio usa otra rama u
+      # otro objectClass.
+      - LDAP_GROUP_BASE_DN=${LDAP_GROUP_BASE_DN:-}
+      - LDAP_GROUP_FILTER=${LDAP_GROUP_FILTER:-}
+      # VLAN de reserva cuando el grupo LDAP no define FreeRADIUSVLAN.
+      - DEFAULT_VLAN=${DEFAULT_VLAN:-20}
     volumes:
       - ./data/freeradius:/data
       - radius_logs:/var/log/freeradius
